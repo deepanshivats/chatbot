@@ -1,80 +1,121 @@
-from flask import Flask, render_template_string, request, jsonify
-import nltk
+from flask import Flask, render_template, request, redirect, session, url_for
 import random
-import string
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from main import (
+    greet, is_casual, styled_bot_response, check_banking_intents,
+    response, login_user, get_account_details, GREET_RESPONSES
+)
 
-nltk.download('punkt')
-nltk.download('wordnet')
+app = Flask(__name__, static_folder='static')
+app.secret_key = 'secret123'  # Session key
 
-# 🧠 Load chatbot knowledge
-with open('chatbot.txt', 'r', errors='ignore') as f:
-    doc = f.read().lower()
 
-sent_tokens = nltk.sent_tokenize(doc)
-lemmer = nltk.stem.WordNetLemmatizer()
-remove_punct_dict = dict((ord(p), None) for p in string.punctuation)
+@app.route("/", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        login_id = request.form.get("login_id")
+        password = request.form.get("password")
+        user = login_user(login_id, password)
 
-def lemtokens(tokens): return [lemmer.lemmatize(t) for t in tokens]
-def lemnormalize(text): return lemtokens(nltk.word_tokenize(text.lower().translate(remove_punct_dict)))
+        if user:
+            session["user"] = {
+                "id": user[0],
+                "login_id": user[1],
+                "name": user[3]
+            }
+            session["chat_history"] = []  # Reset chat on new login
+            return redirect("/chat")
+        else:
+            return render_template("login.html",
+                                   error="❌ Invalid login ID or password.")
 
-def response(user_response):
-    tfidfvec = TfidfVectorizer(tokenizer=lemnormalize, stop_words='english')
-    tfidf = tfidfvec.fit_transform(sent_tokens + [user_response])
-    vals = cosine_similarity(tfidf[-1], tfidf[:-1])
-    idx = vals.argsort()[0][-1]
-    flat = vals.flatten()
-    flat.sort()
-    req_tfidf = flat[-1]
-    if req_tfidf == 0:
-        return "❓ I didn't get that. Try asking about loans, cards, or accounts."
-    else:
-        return sent_tokens[idx]
+    return render_template("login.html")
 
-# 🚀 Create Flask app
-app = Flask(__name__)
 
-# 🖼️ Basic HTML with JS
-html = """
-<!DOCTYPE html>
-<html>
-<head><title>Bankie Chatbot</title></head>
-<body style="font-family:Arial;padding:20px;">
-  <h2>Bankie Chatbot</h2>
-  <input type="text" id="userInput" placeholder="Ask me something..." style="width:300px;padding:10px;">
-  <button onclick="sendMessage()">Send</button>
-  <div id="chat" style="margin-top:20px;"></div>
-
-<script>
-function sendMessage() {
-  const msg = document.getElementById("userInput").value;
-  fetch('/chat', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({message: msg})
-  })
-  .then(res => res.json())
-  .then(data => {
-    document.getElementById("chat").innerHTML += "<p><strong>You:</strong> " + msg + "</p>";
-    document.getElementById("chat").innerHTML += "<p><strong>Bot:</strong> " + data.reply + "</p>";
-    document.getElementById("userInput").value = "";
-  });
-}
-</script>
-</body>
-</html>
-"""
-
-@app.route('/')
-def home():
-    return render_template_string(html)
-
-@app.route('/chat', methods=['POST'])
+@app.route("/chat", methods=["GET", "POST"])
 def chat():
-    user_msg = request.json.get("message")
-    reply = response(user_msg)
-    return jsonify({'reply': reply})
+    if "user" not in session:
+        return redirect(url_for("login"))
 
-if __name__ == '__main__':
-    app.run(debug=True)
+    if request.method == "POST":
+        user_msg = request.form.get("message", "").strip()
+        if user_msg:
+            chat_history = session.get("chat_history", [])
+            casual = is_casual(user_msg)
+            chat_history.append(f"You: {user_msg}")
+
+            replies = []
+
+            # 🚪 Exit check
+            if user_msg.lower() in ['bye', 'exit', 'quit']:
+                styled_reply = styled_bot_response("👋 Goodbye! Take care bhai!", casual)
+                chat_history.append(f"Bot: {styled_reply}")
+                session["chat_history"] = chat_history
+                return styled_reply
+
+            # 💬 Normalize, split and remove duplicate queries
+            queries = [query.strip() for query in user_msg.replace('?', '.').split('.') if query.strip()]
+            queries = list(dict.fromkeys(queries))  # Remove duplicates
+
+            seen_replies = set()
+
+            for query in queries:
+                response_found = False
+
+                # Greeting detection
+                if greet(query):
+                    if "Greeting detected" not in seen_replies:
+                        replies.append(random.choice(GREET_RESPONSES))
+                        seen_replies.add("Greeting detected")
+                        response_found = True
+                    continue
+
+                # Check for account-related keywords
+                if "account" in query.lower() or "balance" in query.lower():
+                    result = get_account_details(session["user"]["login_id"])
+                    if result and result not in seen_replies:
+                        replies.append(result)
+                        seen_replies.add(result)
+                        response_found = True
+                    continue
+
+                # Check banking intents
+                intent_reply = check_banking_intents(query)
+                if intent_reply and intent_reply not in seen_replies:
+                    replies.append(intent_reply)
+                    seen_replies.add(intent_reply)
+                    response_found = True
+                    continue
+
+                # Fallback response
+                if not response_found:
+                    fallback_reply = response(query)
+                    if fallback_reply and fallback_reply not in seen_replies:
+                        replies.append(fallback_reply)
+                        seen_replies.add(fallback_reply)
+
+            # Format response
+            if replies:
+                combined_reply = "\n\n".join(replies)
+                styled_reply = styled_bot_response(combined_reply, casual)
+            else:
+                styled_reply = styled_bot_response("❓ I'm not sure I understood that.", casual)
+
+            chat_history.append(f"Bot: {styled_reply}")
+            session["chat_history"] = chat_history
+
+            return styled_reply
+
+    # GET request — render chat UI
+    return render_template("chat.html",
+                           chat_history=session.get("chat_history", []),
+                           name=session["user"]["name"])
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/")
+
+
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=5000, debug=True)
