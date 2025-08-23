@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify
+from main import login, chat, logout
 import random
 
 app = Flask(__name__)
@@ -79,4 +80,5 @@ def account():
 # ---------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
